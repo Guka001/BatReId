@@ -1,0 +1,85 @@
+[project]
+name = "batreid"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Guy Clement Kamdem",email = "guy.c.kamdem@fau.de"}
+]
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "pillow (>=12.2.0,<13.0.0)",
+    "megadetector (>=10.0.21,<11.0.0)",
+    "opencv-python-headless (>=4.13.0.92,<5.0.0.0)",
+    "numpy (>=2.4.6,<3.0.0)",
+    "ultralytics (>=8.4.63,<9.0.0)",
+    "pytorchwildlife (>=1.3.0,<2.0.0)",
+    "soundfile (>=0.14.0,<0.15.0)",
+    "librosa (>=0.11.0,<0.12.0)",
+    "pydantic (>=2.13.4,<3.0.0)",
+]
+
+[tool.poetry]
+package-mode = false
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "ruff (>=0.15.16,<0.16.0)",
+    "mypy (>=2.1.0,<3.0.0)",
+    "poethepoet (>=0.46.0,<0.47.0)"
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",  # All error codes
+    "F",  # All flake8 codes
+    "W",  # All warning codes
+    "B",  # All bugbear codes
+    "I",  # All import checks
+    "Q",  # All flake8-quotes checks
+    "S",  # All security checks
+    "N",  # All naming checks
+    "C4", # Catch incorrect use of comprehensions, dict, list, etc
+    "UP", # Modernize syntax (f-strings, newer type hints, etc.)
+]
+
+ignore = [
+    "W191",  # Indentation contains tabs
+    "S603",  # subprocess call with untrusted input
+    "S607",  # partial executable path
+]
+
+fixable = ["ALL"]
+unfixable = ["B"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-line-length = "dynamic"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+strict = true
+show_error_codes = true
+no_implicit_optional = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+warn_unreachable = true
+check_untyped_defs = true         # type-check bodies even without annotations
+disallow_incomplete_defs = true   # reject partially annotated functions
+
+[tool.poe.tasks]
+lint = {sequence = [{cmd = "ruff check src --fix"}, {cmd = "ruff format src"}, ]}
+typecheck = {cmd = "mypy"}
+check = ["lint", "typecheck"]
