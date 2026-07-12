@@ -25,7 +25,16 @@ def select_roi_from_video(video_path: Path) -> dict[str, int]:
 
 
 def track_crosses_roi(track: Track, roi: dict[str, int]) -> bool:
-    """Test whether a track's path ever enters the marked ROI."""
+    """Test whether a track's path ever enters the marked ROI.
+
+    Args:
+        track (Track): The track to test.
+        roi (dict[str, int]): The Region of interest
+
+    Returns:
+        bool: True if the track crosses the ROI, False otherwise.
+    """
+
     rect = shapely_box(roi["x1"], roi["y1"], roi["x2"], roi["y2"])
     frames_sorted = sorted(track.history_frame_to_centroid.keys())
 
