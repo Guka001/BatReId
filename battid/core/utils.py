@@ -4,7 +4,7 @@ import cv2
 from shapely.geometry import LineString, Point
 from shapely.geometry import box as shapely_box
 
-from .tracking import Track
+from battid.core.tracking import Track
 
 
 def select_roi_from_video(video_path: Path) -> dict[str, int]:

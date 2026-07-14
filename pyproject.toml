@@ -1,5 +1,5 @@
 [project]
-name = "batreid"
+name = "battid"
 version = "0.1.0"
 description = ""
 authors = [
@@ -13,8 +13,7 @@ dependencies = [
     "numpy (>=2.4.6,<3.0.0)",
     "pydantic (>=2.13.4,<3.0.0)",
     "shapely (>=2.1.2,<3.0.0)",
-    "scipy (>=1.18.0,<2.0.0)",
-    "filterpy (>=1.4.5,<2.0.0)",
+    "supervision (>=0.29.1,<0.30.0)",
 ]
 
 [tool.poetry]
@@ -68,7 +67,7 @@ convention = "google"
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src"]
+files = ["battid"]
 strict = true
 show_error_codes = true
 no_implicit_optional = true
@@ -79,6 +78,6 @@ check_untyped_defs = true         # type-check bodies even without annotations
 disallow_incomplete_defs = true   # reject partially annotated functions
 
 [tool.poe.tasks]
-lint = {sequence = [{cmd = "ruff check src --fix"}, {cmd = "ruff format src"}, ]}
+lint = {sequence = [{cmd = "ruff check battid --fix"}, {cmd = "ruff format battid"}, ]}
 typecheck = {cmd = "mypy"}
 check = ["lint", "typecheck"]

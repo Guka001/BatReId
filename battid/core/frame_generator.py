@@ -64,6 +64,13 @@ class FrameGenerator:
         height, width = image.shape[:2]
         return width, height
 
+    @staticmethod
+    def get_video_fps(video: Path) -> int:
+        cap = cv2.VideoCapture(str(video))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+        return int(round(fps)) if fps and fps > 0 else 25
+
     @classmethod
     def parse_frame_index(cls, frame_filename: str) -> int:
         """Extract the frame index from a filename produced by FrameGenerator,

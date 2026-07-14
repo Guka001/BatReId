@@ -6,7 +6,7 @@ from .frame_generator import FrameGenerator
 from .models.detection_model_output import DCOutput
 from .models.sequence_output import SequenceRecord
 from .object_detection.mgd5 import MGD5
-from .tracking import SimpleSORT, Track
+from .tracking import BatTracker, Track
 from .utils import select_roi_from_video, track_crosses_roi
 
 
@@ -20,6 +20,9 @@ class Sequencer:
         self._logger: logging.Logger = logging.getLogger(__name__)
         self._confidence_threshold: float = 0.3
         self._min_track_len: int = 2
+        self._track_activation_threshold: float = 0.25
+        self._lost_track_buffer: int = 30
+        self._minimum_matching_threshold: float = 0.8
 
         self._output: Path = output
         self._output.mkdir(exist_ok=True)
@@ -31,15 +34,15 @@ class Sequencer:
         self._detector: MGD5 = MGD5()
         self._roi: dict[str, int] | None = None
 
-    def _create_video_frames(self, video: Path) -> tuple[Path, int, int]:
+    def _create_video_frames(self, video: Path) -> tuple[Path, int, int, int]:
         """Create frame sequences from a video file.
 
         Args:
             video (Path): Path to the source video file to be processed.
 
         Returns:
-            (Tuple[Path, int, int]): The path to the folder containing the generated
-            frames, and the width and height of the frames.
+            (Tuple[Path, int, int, int]): The path to the folder containing the generated
+            frames, the width and height of the frames, and the video fps.
         """
 
         self._logger.info(f"Generating video frames for file {video}")
@@ -47,17 +50,16 @@ class Sequencer:
         destination = self._frames_output.joinpath(video.stem)
         FrameGenerator.deconstruct_video_into_frames(video, destination)
         img_w, img_h = FrameGenerator.get_frame_size(destination)
+        fps = FrameGenerator.get_video_fps(video)
+
         self._logger.info("Generation completed")
 
-        return destination, img_w, img_h
+        return destination, img_w, img_h, fps
 
-    def _run_tracking(self, detections: DCOutput, img_w: int, img_h: int) -> list[Track]:
-        """Filter detections by category and confidence, denormalize bboxes
-        to pixel coordinates, and feed them frame-by-frame into a SORT tracker.
-        """
+    def _run_tracking(self, detections: DCOutput, img_w: int, img_h: int, fps: int) -> list[Track]:
         animal_category_ids = {cat_id for cat_id, name in detections.detection_categories.items() if name == "animal"}
 
-        per_frame_detections: dict[int, list[tuple[float, float, float, float]]] = {}
+        per_frame_detections: dict[int, list[tuple[float, float, float, float, float]]] = {}
         for image_result in detections.images:
             frame_idx = FrameGenerator.parse_frame_index(image_result.file)
             boxes = []
@@ -67,10 +69,19 @@ class Sequencer:
                 if det.conf < self._confidence_threshold:
                     continue
                 x, y, w, h = det.bbox
-                boxes.append((x * img_w, y * img_h, (x + w) * img_w, (y + h) * img_h))
+
+                # Denormalize the bounding box coordinates to pixel values
+                boxes.append((x * img_w, y * img_h, (x + w) * img_w, (y + h) * img_h, det.conf))
+
             per_frame_detections[frame_idx] = boxes
 
-        tracker = SimpleSORT()
+        tracker = BatTracker(
+            frame_rate=fps,
+            track_activation_threshold=self._track_activation_threshold,
+            lost_track_buffer=self._lost_track_buffer,
+            minimum_matching_threshold=self._minimum_matching_threshold,
+        )
+
         for frame_idx in sorted(per_frame_detections):
             tracker.step(per_frame_detections[frame_idx], frame_idx)
 
@@ -120,14 +131,14 @@ class Sequencer:
         if self._roi is None:
             self._roi = select_roi_from_video(video)
 
-        frames_path, img_w, img_h = self._create_video_frames(video)
+        frames_path, img_w, img_h, fps = self._create_video_frames(video)
 
         self._logger.info(f"Running detection on frames for {video}")
 
         detections = self._detector.run_detection(frames_path)
         detections.save(self._output.joinpath(f"{video.stem}_detections.json"))
 
-        tracks = self._run_tracking(detections, img_w, img_h)
+        tracks = self._run_tracking(detections, img_w, img_h, fps)
 
         records = []
         for track in tracks:
