@@ -1,10 +1,11 @@
 from pathlib import Path
 
 import cv2
+import torch
 from shapely.geometry import LineString, Point
 from shapely.geometry import box as shapely_box
 
-from battid.core.tracking import Track
+from battid.core.models.tracking import Track
 
 
 def select_roi_from_video(video_path: Path) -> dict[str, int]:
@@ -49,3 +50,61 @@ def track_crosses_roi(track: Track, roi: dict[str, int]) -> bool:
         if segment.intersects(rect):
             return True
     return False
+
+
+def compute_iou(box_a: tuple[float, float, float, float], box_b: tuple[float, float, float, float]) -> float:
+    """
+    Computes the IOU between two object coordinates.
+
+    Args:
+        box_a (tuple[float, float, float, float]): Bounding-box coordinates of the first object
+        box_b (tuple[float, float, float, float]): Bounding-box coordinates of the second object
+
+    Returns:
+        (float): The IOU score
+    """
+
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+
+    if inter_area <= 0.0:
+        return 0.0
+
+    area_a = (ax2 - ax1) * (ay2 - ay1)
+    area_b = (bx2 - bx1) * (by2 - by1)
+    union = area_a + area_b - inter_area
+
+    return inter_area / union if union > 0.0 else 0.0
+
+
+def format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+
+    total_seconds = int(round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or hours:
+        parts.append(f"{minutes}m")
+    parts.append(f"{secs}s")
+
+    return " ".join(parts)
+
+
+def get_detection_workers(max_cpu_workers: int) -> int:
+    if torch.cuda.is_available() or torch.backends.mps.is_available():
+        return 1
+    return max_cpu_workers

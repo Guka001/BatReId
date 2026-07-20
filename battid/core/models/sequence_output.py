@@ -7,3 +7,4 @@ class SequenceRecord(BaseModel):
     frame_start: int
     frame_end: int
     output_dir: str
+    empty: bool

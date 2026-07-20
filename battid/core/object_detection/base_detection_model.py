@@ -11,7 +11,7 @@ class BaseDetectionModel(ABC):
     """
 
     @abstractmethod
-    def run_detection(self, image_folder_path: Path) -> DCOutput:
+    def run_detection(self, image_folder_path: Path) -> tuple[DCOutput, float]:
         """Run object detection on all images in a folder and save results.
 
         Processes the images located in `image_folder_path` and returns
@@ -21,6 +21,7 @@ class BaseDetectionModel(ABC):
             image_folder_path (Path): Directory containing input image files.
 
         Returns:
-            (DCOutput): The detection results.
+            (tuple[DCOutput, float]): A tuple containing the detection results and the time
+            (in seconds) needed by the detection model to run on all the images.
         """
         pass

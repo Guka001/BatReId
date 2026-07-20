@@ -1,13 +1,23 @@
 import logging
+import os
 import shutil
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
+
+from PIL import Image
+from tqdm import tqdm
 
 from .frame_generator import FrameGenerator
 from .models.detection_model_output import DCOutput
+from .models.report import DetectionReport, FrameGenerationReport, Report, TrackingReport
 from .models.sequence_output import SequenceRecord
+from .models.tracking import Track, TrackingResult
 from .object_detection.mgd5 import MGD5
-from .tracking import BatTracker, Track
-from .utils import select_roi_from_video, track_crosses_roi
+from .report_generation import PipelineStats, write_reports
+from .tracking import BatTracker
+from .utils import format_duration, get_detection_workers, select_roi_from_video, track_crosses_roi
 
 
 class Sequencer:
@@ -16,13 +26,14 @@ class Sequencer:
     more frame sequences.
     """
 
-    def __init__(self, output: Path) -> None:
+    def __init__(self, output: Path, roi: dict[str, int] | None = None) -> None:
         self._logger: logging.Logger = logging.getLogger(__name__)
         self._confidence_threshold: float = 0.3
-        self._min_track_len: int = 2
-        self._track_activation_threshold: float = 0.25
-        self._lost_track_buffer: int = 30
+        self._min_track_len: int = 20
+        self._lost_track_buffer: int = 5
         self._minimum_matching_threshold: float = 0.8
+        self._crop_padding_ratio: float = 0.15
+        self._border_touch_margin: int = 10
 
         self._output: Path = output
         self._output.mkdir(exist_ok=True)
@@ -32,34 +43,65 @@ class Sequencer:
         self._sequences_output.mkdir(exist_ok=True)
 
         self._detector: MGD5 = MGD5()
-        self._roi: dict[str, int] | None = None
+        self._roi: dict[str, int] | None = roi
 
-    def _create_video_frames(self, video: Path) -> tuple[Path, int, int, int]:
+    def _create_video_frames(self, video: Path) -> tuple[Path, int, int, int, FrameGenerationReport]:
         """Create frame sequences from a video file.
 
         Args:
             video (Path): Path to the source video file to be processed.
 
         Returns:
-            (Tuple[Path, int, int, int]): The path to the folder containing the generated
-            frames, the width and height of the frames, and the video fps.
+            (Tuple[Path, int, int, int, FrameGenerationReport]):
+             The path to the folder containing the generated frames,
+             the width and height of the frames, the video fps and process report.
         """
 
         self._logger.info(f"Generating video frames for file {video}")
 
         destination = self._frames_output.joinpath(video.stem)
-        FrameGenerator.deconstruct_video_into_frames(video, destination)
+        duration, frames = FrameGenerator.deconstruct_video_into_frames(video, destination)
+
+        report = FrameGenerationReport(
+            description=f"Generating frames for video: {video.name}",
+            duration=duration,
+            number_of_frames_generated=frames,
+        )
+
         img_w, img_h = FrameGenerator.get_frame_size(destination)
         fps = FrameGenerator.get_video_fps(video)
 
         self._logger.info("Generation completed")
 
-        return destination, img_w, img_h, fps
+        return destination, img_w, img_h, fps, report
 
-    def _run_tracking(self, detections: DCOutput, img_w: int, img_h: int, fps: int) -> list[Track]:
+    def _run_detection_step(self, frames_path: Path, video: Path) -> tuple[DCOutput, DetectionReport]:
+        """
+        Runs the object detection step on each frame found in the underlying path of the video
+
+        Args:
+            frames_path (Path): The path containing all frames.
+            video (Path): The path to the video corresponding to the frames.
+
+        Returns:
+            (tuple[DCOutput, DetectionReport]). A tuple of detection results and report of the process.
+        """
+
+        self._logger.info(f"Running detection on frames for {video}")
+        detections, duration = self._detector.run_detection(frames_path)
+        detections.save(self._output.joinpath(f"{video.stem}_detections.json"))
+
+        report = DetectionReport(
+            description=f"Running Megadetector detections on video: {video.name}", duration=duration
+        )
+
+        return detections, report
+
+    def _run_tracking_step(self, detections: DCOutput, img_w: int, img_h: int, fps: int) -> TrackingResult:
+        self._logger.info("Tracking detections")
         animal_category_ids = {cat_id for cat_id, name in detections.detection_categories.items() if name == "animal"}
-
         per_frame_detections: dict[int, list[tuple[float, float, float, float, float]]] = {}
+
         for image_result in detections.images:
             frame_idx = FrameGenerator.parse_frame_index(image_result.file)
             boxes = []
@@ -77,17 +119,141 @@ class Sequencer:
 
         tracker = BatTracker(
             frame_rate=fps,
-            track_activation_threshold=self._track_activation_threshold,
+            track_activation_threshold=self._confidence_threshold,
             lost_track_buffer=self._lost_track_buffer,
             minimum_matching_threshold=self._minimum_matching_threshold,
         )
 
+        start_time = time.time()
+
         for frame_idx in sorted(per_frame_detections):
             tracker.step(per_frame_detections[frame_idx], frame_idx)
 
-        return tracker.finalize()
+        duration = time.time() - start_time
+        self._logger.info("Tracking completed")
 
-    def _export_sequence(self, video: Path, frames_path: Path, track: Track) -> SequenceRecord:
+        return TrackingResult(
+            tracks=tracker.finalize(),
+            num_ids=tracker.number_of_ids(),
+            overlap_episodes=tracker.overlap_episodes(),
+            duration=duration,
+        )
+
+    def _track_and_export(
+        self, video: Path, frames_path: Path, detections: DCOutput, img_w: int, img_h: int, fps: int, crop: bool
+    ) -> TrackingReport:
+
+        tracking_result = self._run_tracking_step(detections, img_w, img_h, fps)
+        overlaps_count = len(tracking_result.overlap_episodes)
+
+        records = []
+        flight_coordinates: dict[int, list[tuple[float, float, float, float]]] = {}
+        discarded_flight_coordinates: dict[int, list[tuple[float, float, float, float]]] = {}
+
+        for track in tracking_result.tracks:
+            frames_count = len(track.frames)
+            self._logger.info(f"Parsing Track {track.id}")
+
+            if frames_count < self._min_track_len:
+                discarded_flight_coordinates[track.id] = list(track.history_frame_to_bbox.values())
+                self._logger.warning(
+                    f"Discarding Track {track.id} due to insufficient frame size."
+                    f"Expected: >={self._min_track_len} frames, Actual: {frames_count} frames"
+                )
+                continue
+
+            if self._roi is None:
+                raise ValueError(
+                    "ROI has not been set. Please set the ROI before generating sequences or "
+                    "use override_roi=True to select a new ROI."
+                )
+
+            if track_crosses_roi(track, self._roi):
+                sequence = self._export_sequence(video, frames_path, track, img_w, img_h, crop)
+                if not sequence.empty:
+                    records.append(sequence)
+                    flight_coordinates[track.id] = list(track.history_frame_to_bbox.values())
+                else:
+                    self._logger.warning(
+                        f"Discarding Track {track.id}. Track bbox coordinates are not fully enclosed within the video"
+                    )
+            else:
+                self._logger.warning(f"Discarding Track {track.id}. This Track doesn't pass through the specified ROI")
+                discarded_flight_coordinates[track.id] = list(track.history_frame_to_bbox.values())
+
+        self._logger.info(f"{len(records)} accepted sequence(s) for {video.name}")
+
+        return TrackingReport(
+            description=f"Tracking detections for {video.name}",
+            duration=tracking_result.duration,
+            min_track_length=self._min_track_len,
+            minimum_matching_threshold=self._minimum_matching_threshold,
+            number_of_survived_lost_tracks=self._lost_track_buffer,
+            overlaps=overlaps_count > 0,
+            number_of_overlaps=overlaps_count,
+            raw_number_of_unique_tracks=tracking_result.num_ids,
+            number_of_unique_tracks_kept=len(records),
+            flights=flight_coordinates,
+            discarded_flights=discarded_flight_coordinates,
+        )
+
+    def _pad_and_clamp_bbox(
+        self,
+        bbox: tuple[float, float, float, float],
+        img_w: int,
+        img_h: int,
+    ) -> tuple[int, int, int, int]:
+        """
+        Expands a bbox by `self._crop_padding_ratio` of its own width/height on
+        each side, then clamps the result to the image bounds.
+
+        Args:
+            bbox: (x1, y1, x2, y2) in pixel coordinates.
+            img_w: Width of the source frame, in pixels.
+            img_h: Height of the source frame, in pixels.
+
+        Returns:
+            (x1, y1, x2, y2) as ints, padded and clamped to [0, img_w] x [0, img_h].
+        """
+        x1, y1, x2, y2 = bbox
+        box_w = x2 - x1
+        box_h = y2 - y1
+
+        pad_x = box_w * self._crop_padding_ratio
+        pad_y = box_h * self._crop_padding_ratio
+
+        x1 -= pad_x
+        y1 -= pad_y
+        x2 += pad_x
+        y2 += pad_y
+
+        x1 = max(0, int(round(x1)))
+        y1 = max(0, int(round(y1)))
+        x2 = min(img_w, int(round(x2)))
+        y2 = min(img_h, int(round(y2)))
+
+        return x1, y1, x2, y2
+
+    def _bbox_touches_border(self, x1: int, y1: int, x2: int, y2: int, img_w: int, img_h: int) -> bool:
+        """
+        Checks whether a (padded, clamped) bbox sits close enough to the frame
+        edge that the animal is likely cut off.
+
+        Args:
+            x1, y1, x2, y2: Padded and clamped bbox coordinates, in pixels.
+            img_w: Width of the source frame, in pixels.
+            img_h: Height of the source frame, in pixels.
+
+        Returns:
+            (bool): True if the bbox is within the border margin on any side.
+        """
+        margin = self._border_touch_margin
+
+        return x1 <= margin or y1 <= margin or x2 >= img_w - margin or y2 >= img_h - margin
+
+    def _export_sequence(
+        self, video: Path, frames_path: Path, track: Track, img_w: int, img_h: int, crop: bool
+    ) -> SequenceRecord:
         """Copy the contiguous frame range of an accepted track into its own
         sequence folder.
 
@@ -95,20 +261,68 @@ class Sequencer:
             video (Path): Path to the source video file.
             frames_path (Path): Path to the folder containing the generated frames.
             track (Track): The track object representing the accepted sequence.
+            img_w (int): Width of the video frames, in pixels.
+            img_h (int): Height of the video frames, in pixels.
+            crop (bool): If True, export each frame cropped (and padded) to the
+                track's bbox for that frame, instead of the full frame.
 
         Returns:
             (SequenceRecord): A record containing metadata about the exported sequence.
         """
+        self._logger.info("Exporting sequences")
+
         frame_start, frame_end = min(track.frames), max(track.frames)
         sequence_dir = self._sequences_output.joinpath(f"{video.stem}_track{track.id}")
         sequence_dir.mkdir(exist_ok=True)
 
+        exported_frames: list[int] = []
+
         for frame_idx in range(frame_start, frame_end + 1):
-            frame_file = frames_path.joinpath(f"{video.name}_frame_{frame_idx:04d}.jpg")
-            if frame_file.exists():
-                shutil.copy(frame_file, sequence_dir.joinpath(frame_file.name))
+            bbox = track.history_frame_to_bbox.get(frame_idx)
+            if bbox is None:
+                continue
+
+            cx1, cy1, cx2, cy2 = None, None, None, None
+            if crop:
+                cx1, cy1, cx2, cy2 = self._pad_and_clamp_bbox(bbox, img_w, img_h)
+
+                if cx2 <= cx1 or cy2 <= cy1:
+                    self._logger.warning(f"Degenerate crop box for track {track.id} frame {frame_idx}, skipping")
+                    continue
+
+                if self._bbox_touches_border(cx1, cy1, cx2, cy2, img_w, img_h):
+                    self._logger.debug(
+                        f"Track {track.id} frame {frame_idx}: padded bbox touches frame border, "
+                        f"likely partial animal body, skipping"
+                    )
+                    continue
             else:
+                x1, y1, x2, y2 = bbox
+                if x1 < 0 or y1 < 0 or x2 > img_w or y2 > img_h:
+                    continue  # bbox clipped by frame edge, skip
+
+            frame_file = frames_path.joinpath(f"{video.name}_frame_{frame_idx:04d}.jpg")
+            if not frame_file.exists():
                 self._logger.warning(f"Expected frame file not found: {frame_file}")
+                continue
+
+            dest_file = sequence_dir.joinpath(frame_file.name)
+
+            if crop:
+                with Image.open(frame_file) as img:
+                    if cx1 is None or cy1 is None or cx2 is None or cy2 is None:
+                        raise ValueError("Invalid bbox coordinates for export")
+
+                    img.crop((cx1, cy1, cx2, cy2)).save(dest_file)
+            else:
+                shutil.copy(frame_file, dest_file)
+
+            exported_frames.append(frame_idx)
+
+        if not exported_frames:
+            self._logger.warning(f"Track {track.id} for {video.name} had no in-bounds frames to export")
+        else:
+            self._logger.info("Export completed")
 
         return SequenceRecord(
             video=str(video),
@@ -116,36 +330,203 @@ class Sequencer:
             frame_start=frame_start,
             frame_end=frame_end,
             output_dir=str(sequence_dir),
+            empty=len(exported_frames) == 0,
         )
 
-    def generate_sequence(self, video: Path) -> list[SequenceRecord]:
-        """Run the full per-video pipeline: ROI setup (once), frame
-        extraction, detection, tracking, ROI-based filtering, and export.
+    @staticmethod
+    def compute_roi(video: Path) -> dict[str, int]:
+        """Prompt the user to select a region of interest (ROI) from a video.
+
+        Args:
+            video (Path): Path to the source video file from which to select the ROI.
+
+        Returns:
+            (dict[str, int]): A dictionary containing the coordinates of the selected ROI.
+        """
+
+        return select_roi_from_video(video)
+
+    def generate_sequence(self, video: Path, override_roi: bool = False, crop: bool = False) -> list[Report]:
+        """Generate a consecutive frame sequence from the given video
 
         Args:
             video (Path): Path to the source video file to be processed.
+            override_roi (bool): If True, class ROI will be overwritten with the new determined value.
+            crop (bool): If True, each frame in the sequence will be cropped to only include bat
 
         Returns:
-            (list[SequenceRecord]): One record per accepted sequence.
+            (list[Report]): A report describing the sequence generation
         """
-        if self._roi is None:
-            self._roi = select_roi_from_video(video)
 
-        frames_path, img_w, img_h, fps = self._create_video_frames(video)
+        if override_roi:
+            self._roi = self.compute_roi(video)
+
+        if self._roi is None:
+            raise ValueError(
+                "ROI has not been set. Please set the ROI before generating sequences or "
+                "use override_roi=True to select a new ROI."
+            )
+
+        reports: list[Report] = []
+
+        frames_path, img_w, img_h, fps, frame_gen_report = self._create_video_frames(video)
+        reports.append(frame_gen_report)
 
         self._logger.info(f"Running detection on frames for {video}")
 
-        detections = self._detector.run_detection(frames_path)
-        detections.save(self._output.joinpath(f"{video.stem}_detections.json"))
+        detections, detection_report = self._run_detection_step(frames_path, video)
+        reports.append(detection_report)
 
-        tracks = self._run_tracking(detections, img_w, img_h, fps)
+        tracking_report = self._track_and_export(video, frames_path, detections, img_w, img_h, crop, crop)
+        reports.append(tracking_report)
 
-        records = []
-        for track in tracks:
-            if len(track.frames) < self._min_track_len:
-                continue
-            if track_crosses_roi(track, self._roi):
-                records.append(self._export_sequence(video, frames_path, track))
+        return reports
 
-        self._logger.info(f"{len(records)} accepted sequence(s) for {video}")
-        return records
+    def _run_extraction_phase(self, videos: list[Path], max_workers: int) -> list[dict[str, Any]]:
+        results = []
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self._create_video_frames, video): video for video in videos}
+
+            with tqdm(total=len(futures), desc="Extracting frames", unit="video") as pbar:
+                for future in as_completed(futures):
+                    video = futures[future]
+                    try:
+                        frames_path, img_w, img_h, fps, frame_report = future.result()
+                        results.append(
+                            {
+                                "video": video,
+                                "frames_path": frames_path,
+                                "img_w": img_w,
+                                "img_h": img_h,
+                                "fps": fps,
+                                "reports": [frame_report],
+                            }
+                        )
+                        pbar.set_postfix_str(f"[OK] - {video.name}")
+                    except Exception as e:
+                        self._logger.error(f"Frame extraction failed for {video}: {e}")
+                        pbar.set_postfix_str(f"[N.OK] - {video.name}")
+                    finally:
+                        pbar.update(1)
+        return results
+
+    def _run_detection_phase(self, frame_data: list[dict[str, Any]], max_workers: int) -> list[dict[str, Any]]:
+        results = []
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._run_detection_step, entry["frames_path"], entry["video"]): entry
+                for entry in frame_data
+            }
+
+            with tqdm(total=len(futures), desc="Running detection", unit="video") as pbar:
+                for future in as_completed(futures):
+                    entry = futures[future]
+                    try:
+                        detections, detection_report = future.result()
+                        entry["detections"] = detections
+                        entry["reports"].append(detection_report)
+                        results.append(entry)
+                        pbar.set_postfix_str(f"[OK] - {entry['video'].name}")
+                    except Exception as e:
+                        self._logger.error(f"Detection failed for {entry['video']}: {e}")
+                        pbar.set_postfix_str(f"[N.OK] - {entry['video'].name}")
+                    finally:
+                        pbar.update(1)
+        return results
+
+    def _run_tracking_phase(
+        self,
+        detection_data: list[dict[str, Any]],
+        crop: bool,
+        max_workers: int,
+        generate_report: bool,
+        videos: list[Path],
+        stats: PipelineStats,
+    ) -> None:
+
+        video_reports: dict[Path, list[Report]] = {}
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    self._track_and_export,
+                    entry["video"],
+                    entry["frames_path"],
+                    entry["detections"],
+                    entry["img_w"],
+                    entry["img_h"],
+                    entry["fps"],
+                    crop,
+                ): entry
+                for entry in detection_data
+            }
+
+            with tqdm(total=len(futures), desc="Tracking & exporting", unit="video") as pbar:
+                for future in as_completed(futures):
+                    entry = futures[future]
+                    video = entry["video"]
+                    try:
+                        tracking_report = future.result()
+                        reports = entry["reports"] + [tracking_report]
+
+                        if generate_report:
+                            if self._roi is None:
+                                raise ValueError(
+                                    "ROI has not been set. Please set the ROI before generating sequences or "
+                                    "use override_roi=True to select a new ROI."
+                                )
+
+                            write_reports(reports, video, self._output, self._roi)
+
+                        video_reports[video] = reports
+                        pbar.set_postfix_str(f"[OK] - {video.name}")
+                    except Exception as e:
+                        self._logger.error(f"Tracking failed for {video}: {e}")
+                        pbar.set_postfix_str(f"[N.OK] - {video.name}")
+                    finally:
+                        pbar.update(1)
+
+        # Rebuild in original input order, and only for videos that actually succeeded
+        process_reports: list[Report] = []
+        for video in videos:
+            reports = video_reports.get(video)
+            if reports is None:
+                continue  # failed earlier in the pipeline(already logged)
+
+            stats.record(video, reports)
+            process_reports += reports
+
+    def generate_sequences(
+        self, videos: list[Path], override_roi: bool = False, crop: bool = False, generate_report: bool = False
+    ) -> None:
+
+        if override_roi:
+            self._roi = self.compute_roi(videos[0])
+
+        if self._roi is None:
+            raise ValueError(
+                "ROI has not been set. Please set the ROI before generating sequences or "
+                "use override_roi=True to select a new ROI."
+            )
+
+        cpu_cores = os.cpu_count()
+        if cpu_cores is None:
+            cpu_cores = 1
+
+        cpu_workers = cpu_cores - 1 if cpu_cores > 1 else 1
+        detection_workers = get_detection_workers(cpu_workers)
+
+        self._logger.info(f"CPU workers: {cpu_workers}, detection workers: {detection_workers}")
+        self._logger.info(f"Number of videos: {len(videos)}")
+
+        stats = PipelineStats()
+        start_time = time.time()
+
+        frame_data = self._run_extraction_phase(videos, cpu_workers)
+        detection_data = self._run_detection_phase(frame_data, detection_workers)
+        self._run_tracking_phase(detection_data, crop, cpu_workers, generate_report, videos, stats)
+        stats.write_summary(self._output)
+
+        duration = time.time() - start_time
+        self._logger.info(f"Process duration: {format_duration(duration)}")

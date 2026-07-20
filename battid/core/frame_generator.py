@@ -1,8 +1,10 @@
 import logging
 import re
+import time
 from pathlib import Path
 
 import cv2
+from tqdm import tqdm
 
 
 class FrameGenerator:
@@ -16,13 +18,17 @@ class FrameGenerator:
     _FRAME_IDX_RE = re.compile(r"_frame_(\d+)\.jpg$")
 
     @classmethod
-    def deconstruct_video_into_frames(cls, source: Path, destination: Path) -> None:
+    def deconstruct_video_into_frames(cls, source: Path, destination: Path) -> tuple[float, int]:
         """Extract all frames from a video file and save them as JPEG images.
 
         Args:
             source (Path): Path to the source video file. Must exist and be a file.
             destination (Path): Directory where extracted frames will be written.
             Wil be created if it does not already exist.
+
+        Returns:
+            (tuple[float, int]): A tuple containing the time (in seconds) needed to process the video file
+            and the number of frames generated.
         """
         if not source.is_file():
             raise FileNotFoundError(f"Source: {source} must be a valid file")
@@ -31,19 +37,26 @@ class FrameGenerator:
         cls._logger.info(f"Parsing video {source}")
 
         video: cv2.VideoCapture = cv2.VideoCapture(source)
-        frame_idx: int = 0
+        frame_idx = 0
+        start_time = time.time()
 
-        while True:
-            success, frame = video.read()
-            if not success:
-                break
+        total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
 
-            out = destination.joinpath(f"{source.name}_frame_{frame_idx:04d}.jpg")
-            cv2.imwrite(out, frame)
-            frame_idx += 1
+        with tqdm(total=total_frames, desc=f"Extracting frames from {source.name}", unit="frame") as pbar:
+            while True:
+                success, frame = video.read()
+                if not success:
+                    break
 
+                out = destination.joinpath(f"{source.name}_frame_{frame_idx:04d}.jpg")
+                cv2.imwrite(str(out), frame)
+                frame_idx += 1
+                pbar.update(1)
+
+        duration = time.time() - start_time
         video.release()
         cls._logger.info("Parsing successful")
+        return duration, frame_idx
 
     @staticmethod
     def get_frame_size(frames_path: Path) -> tuple[int, int]:
