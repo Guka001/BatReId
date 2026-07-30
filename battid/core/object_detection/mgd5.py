@@ -6,8 +6,8 @@ from pathlib import Path
 
 from megadetector.detection.run_detector_batch import load_and_run_detector_batch, write_results_to_file
 
-from ..models.detection_model_output import DCOutput
-from .base_detection_model import BaseDetectionModel
+from battid.core.object_detection.base_detection_model import BaseDetectionModel
+from battid.models.detection_model_output import DCOutput
 
 
 class MGD5(BaseDetectionModel):

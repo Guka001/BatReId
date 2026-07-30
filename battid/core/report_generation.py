@@ -1,7 +1,5 @@
 """Utilities for writing human-readable pipeline reports"""
 
-from __future__ import annotations
-
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,8 +8,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-from .models.report import Report, Task, TrackingReport
-from .utils import format_duration
+from battid.core.utils import format_duration
+from battid.models.report import Report, Task, TrackingReport
 
 matplotlib.use("Agg")  # headless
 _EXCLUDED_FROM_GENERIC_DUMP = {"description", "duration", "flights", "discarded_flights"}

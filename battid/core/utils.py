@@ -5,7 +5,7 @@ import torch
 from shapely.geometry import LineString, Point
 from shapely.geometry import box as shapely_box
 
-from battid.core.models.tracking import Track
+from battid.models.tracking import Track
 
 
 def select_roi_from_video(video_path: Path) -> dict[str, int]:

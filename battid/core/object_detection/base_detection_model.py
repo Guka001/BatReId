@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from ..models.detection_model_output import DCOutput
+from battid.models.detection_model_output import DCOutput
 
 
 class BaseDetectionModel(ABC):

@@ -4,8 +4,8 @@ from itertools import combinations
 import numpy as np
 import supervision as sv
 
-from .models.tracking import OverlapEpisode, Track
-from .utils import compute_iou
+from battid.core.utils import compute_iou
+from battid.models.tracking import OverlapEpisode, Track
 
 
 class BatTracker:
