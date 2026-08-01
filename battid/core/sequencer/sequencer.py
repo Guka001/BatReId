@@ -9,7 +9,7 @@ from PIL import Image
 from battid.core.frame_generator import FrameGenerator
 from battid.core.object_detection.mgd5 import MGD5
 from battid.core.tracking import BatTracker
-from battid.core.utils import select_roi_from_video, track_crosses_roi, pad_and_clamp_bbox
+from battid.core.utils import pad_and_clamp_bbox, select_roi_from_video, track_crosses_roi
 from battid.models.detection_model_output import DCOutput
 from battid.models.report import DetectionReport, FrameGenerationReport, TrackingReport
 from battid.models.sequence_output import SequenceRecord
@@ -47,6 +47,23 @@ class Sequencer(ABC):
 
         self._detector: MGD5 = MGD5()
         self._roi: dict[str, int] | None = roi
+
+    @staticmethod
+    def _build_maps(frames: list[Path], videos_path: list[Path]) -> tuple[dict[str, Path], dict[str, Path]]:
+        frames_map: dict[str, Path] = {}
+        videos_map: dict[str, Path] = {}
+
+        for frame in frames:
+            if not frame.is_dir():
+                raise NotADirectoryError(f"{frame} is not a valid directory")
+            frames_map[frame.stem] = frame
+
+        for video in videos_path:
+            if not video.is_file():
+                raise FileNotFoundError(f"Could not find file {video}")
+            videos_map[video.stem] = video
+
+        return frames_map, videos_map
 
     def _create_video_frames(self, video: Path) -> tuple[Path, int, int, int, FrameGenerationReport]:
         """Create frame sequences from a video file.
@@ -327,9 +344,30 @@ class Sequencer(ABC):
             override_roi (bool): If True, class ROI will be overwritten with the new determined value.
             crop (bool): If True, each frame in the sequence will be cropped to only include bat.
             generate_report (bool): If True, a pipeline report will be generated for each sequence.
+        """
 
-        Returns:
-            (list[Report]): A report describing the sequence generation
+        raise NotImplementedError()
+
+    @abstractmethod
+    def generate_sequences_from_detections(
+        self,
+        videos: list[Path],
+        detection_paths: list[DCOutput],
+        frames_paths: list[Path],
+        override_roi: bool = False,
+        crop: bool = False,
+        generate_report: bool = False,
+    ) -> None:
+        """Generate consecutive frame sequences from the given videos and detections
+
+        Args:
+            videos (Path): Path to the source video files to be processed.
+            detection_paths (list[Path]): List of detection outputs files corresponding to the videos.
+            frames_paths (list[Path]): List of paths to the folders containing the generated frames for each video.
+                These must be the frames the detections were generated from.
+            override_roi (bool): If True, class ROI will be overwritten with the new determined value.
+            crop (bool): If True, each frame in the sequence will be cropped to only include bat.
+            generate_report (bool): If True, a pipeline report will be generated for each sequence.
         """
 
         raise NotImplementedError()

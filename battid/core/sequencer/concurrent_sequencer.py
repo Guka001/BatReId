@@ -9,7 +9,9 @@ from tqdm import tqdm
 
 from battid.core.report_generation import PipelineStats, write_reports
 from battid.core.sequencer.sequencer import Sequencer
+from battid.core.frame_generator import FrameGenerator
 from battid.core.utils import format_duration, get_detection_workers
+from battid.models.detection_model_output import DCOutput
 from battid.models.report import Report
 
 
@@ -159,6 +161,78 @@ class ConcurrentSequencer(Sequencer):
 
         frame_data = self._run_extraction_phase(videos, cpu_workers)
         detection_data = self._run_detection_phase(frame_data, detection_workers)
+        self._run_tracking_phase(detection_data, crop, cpu_workers, generate_report, videos, stats)
+        stats.write_summary(self._output)
+
+        duration = time.time() - start_time
+        self._logger.info(f"Process duration: {format_duration(duration)}")
+
+    def generate_sequences_from_detections(
+        self,
+        videos: list[Path],
+        detection_paths: list[Path],
+        frames_paths: list[Path],
+        override_roi: bool = False,
+        crop: bool = False,
+        generate_report: bool = False,
+    ) -> None:
+        if override_roi:
+            self._roi = self.compute_roi(videos[0])
+
+        if self._roi is None:
+            raise ValueError(
+                "ROI has not been set. Please set the ROI before generating sequences or "
+                "use override_roi=True to select a new ROI."
+            )
+
+        cpu_cores = os.cpu_count()
+        if cpu_cores is None:
+            cpu_cores = 1
+
+        cpu_workers = cpu_cores - 1 if cpu_cores > 1 else 1
+        detection_workers = get_detection_workers(cpu_workers)
+
+        self._logger.info(f"CPU workers: {cpu_workers}, detection workers: {detection_workers}")
+        self._logger.info(f"Number of videos: {len(videos)}")
+
+        stats = PipelineStats()
+        start_time = time.time()
+
+        frames_map, videos_map = self._build_maps(frames_paths, videos)
+        detection_data = []
+
+        for entry in detection_paths:
+            if not entry.is_file():
+                raise FileNotFoundError(f"Could not find file {entry}")
+
+            if entry.suffix != ".json":
+                raise ValueError(f"{entry} must be a a valid JSON file")
+
+            video = videos_map.get(entry.stem)
+            frames = frames_map.get(entry.stem)
+
+            if video is None:
+                raise ValueError(f"{entry} does not match any provided video")
+
+            if frames is None:
+                raise ValueError(f"{entry} does not match any provided frames")
+
+            fps = FrameGenerator.get_video_fps(video)
+            img_w, img_h = FrameGenerator.get_frame_size(frames)
+            detections = DCOutput.model_validate_json(entry.read_text())
+
+            detection_data.append(
+                {
+                    "video": video,
+                    "frames_path": frames,
+                    "detections": detections,
+                    "reports": [],
+                    "fps": fps,
+                    "img_w": img_w,
+                    "img_h": img_h,
+                }
+            )
+
         self._run_tracking_phase(detection_data, crop, cpu_workers, generate_report, videos, stats)
         stats.write_summary(self._output)
 
