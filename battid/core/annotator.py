@@ -1,28 +1,36 @@
 import logging
 import time
+from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import cv2
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 
 from battid.core.frame_generator import FrameGenerator
-from battid.core.sequencer.sequencer import DETECTION_CONF_THRESHOLD, LOST_TRACK_BUFFER, MIN_MATCHING_THRESHOLD, MIN_TRACK_LENGTH, CROP_PADDING_RATIO
+from battid.core.sequencer.sequencer import (
+    CROP_PADDING_RATIO,
+    DETECTION_CONF_THRESHOLD,
+    LOST_TRACK_BUFFER,
+    MIN_MATCHING_THRESHOLD,
+    MIN_TRACK_LENGTH,
+)
 from battid.core.tracking import BatTracker
+from battid.core.utils import format_duration, pad_and_clamp_bbox, track_crosses_roi
 from battid.models.detection_model_output import DCOutput
-from battid.models.tracking import TrackingResult, Track
-from battid.core.utils import track_crosses_roi, pad_and_clamp_bbox, format_duration
-
+from battid.models.tracking import Track, TrackingResult
 
 matplotlib.use("Agg")
 logger = logging.getLogger(__name__)
 
-VALID_TRACK_COLOR = (0, 255, 0)         # green  - crosses the ROI
-TOO_SHORT_TRACK_COLOR = (0, 0, 255)     # red    - discarded: below MIN_TRACK_LENGTH
+VALID_TRACK_COLOR = (0, 255, 0)  # green  - crosses the ROI
+TOO_SHORT_TRACK_COLOR = (0, 0, 255)  # red    - discarded: below MIN_TRACK_LENGTH
 NOT_IN_ROI_TRACK_COLOR = (0, 165, 255)  # orange - discarded: never crosses the ROI
-ROI_COLOR = (255, 191, 0)               # deep sky blue
+ROI_COLOR = (255, 191, 0)  # deep sky blue
 
 CATEGORY_INFO = {
     "valid": (VALID_TRACK_COLOR, "valid"),
@@ -46,9 +54,7 @@ class Annotator:
         self._roi: dict[str, int] = roi
 
     @staticmethod
-    def _run_tracking(
-        img_w: int, img_h: int, animal_category_ids: set[str], detections: DCOutput
-    ) -> TrackingResult:
+    def _run_tracking(img_w: int, img_h: int, animal_category_ids: set[str], detections: DCOutput) -> TrackingResult:
         per_frame_detections: dict[int, list[tuple[float, float, float, float, float]]] = {}
 
         for image_result in detections.images:
@@ -151,10 +157,10 @@ class Annotator:
             raise ValueError(f"Could not read frame {frame_paths[0]}")
         height, width = first_frame.shape[:2]
 
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
         writer = cv2.VideoWriter(str(output_video_path), fourcc, fps, (width, height))
         if not writer.isOpened():
-            raise IOError(f"Could not open video writer for {output_video_path}")
+            raise OSError(f"Could not open video writer for {output_video_path}")
 
         roi_x1, roi_y1 = self._roi["x1"], self._roi["y1"]
         roi_x2, roi_y2 = self._roi["x2"], self._roi["y2"]
@@ -172,8 +178,9 @@ class Annotator:
                 for bbox, color, track_id in annotations.get(frame_idx, []):
                     x1, y1, x2, y2 = (int(v) for v in bbox)
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(frame, str(track_id), (x1, max(0, y1 - 5)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+                    cv2.putText(
+                        frame, str(track_id), (x1, max(0, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA
+                    )
 
                 writer.write(frame)
         finally:
@@ -189,7 +196,7 @@ class Annotator:
         search_key: str,
     ) -> dict[str, int]:
         """Render one full-length video with every track drawn simultaneously,
-        color-coded by category. """
+        color-coded by category."""
         annotations: FrameAnnotations = {}
         counts = {"valid": 0, "too_short": 0, "not_in_roi": 0}
 
@@ -212,12 +219,12 @@ class Annotator:
 
     @classmethod
     def _track_color(cls, index: int) -> tuple[float, float, float, float]:
-        palette = plt.get_cmap("tab20").colors
-        return palette[cls._TAB20_DISTINCT_ORDER[index % len(cls._TAB20_DISTINCT_ORDER)]]
+        cmap = cast(ListedColormap, plt.get_cmap("tab20"))
+        colors = cast(Sequence[tuple[float, float, float, float]], cmap.colors)
+        color = colors[cls._TAB20_DISTINCT_ORDER[index % len(cls._TAB20_DISTINCT_ORDER)]]
+        return cast(tuple[float, float, float, float], tuple(color))
 
-    def _render_flight_path_plot(
-        self, tracks: list[Track], img_w: int, img_h: int, search_key: str
-    ) -> None:
+    def _render_flight_path_plot(self, tracks: list[Track], img_w: int, img_h: int, search_key: str) -> None:
 
         fig, ax = plt.subplots(figsize=(10, 10 * img_h / img_w))
         ax.set_xlim(0, img_w)
@@ -232,8 +239,13 @@ class Annotator:
         roi_x2, roi_y2 = self._roi["x2"], self._roi["y2"]
         ax.add_patch(
             Rectangle(
-                (roi_x1, roi_y1), roi_x2 - roi_x1, roi_y2 - roi_y1,
-                fill=False, edgecolor="deepskyblue", linewidth=1.5, linestyle="--",
+                (roi_x1, roi_y1),
+                roi_x2 - roi_x1,
+                roi_y2 - roi_y1,
+                fill=False,
+                edgecolor="deepskyblue",
+                linewidth=1.5,
+                linestyle="--",
             )
         )
 
@@ -251,17 +263,27 @@ class Annotator:
             ax.scatter(xs[0], ys[0], color="green", s=110, zorder=5, edgecolors="black", linewidths=0.5)
             ax.scatter(xs[-1], ys[-1], color="red", s=110, zorder=5, edgecolors="black", linewidths=0.5)
             ax.annotate(
-                str(track.id), (xs[0], ys[0]), xytext=(6, 6), textcoords="offset points",
-                fontsize=7, fontweight="bold", color="black", zorder=6,
+                str(track.id),
+                (xs[0], ys[0]),
+                xytext=(6, 6),
+                textcoords="offset points",
+                fontsize=7,
+                fontweight="bold",
+                color="black",
+                zorder=6,
             )
             ax.annotate(
-                str(track.id), (xs[-1], ys[-1]), xytext=(6, 6), textcoords="offset points",
-                fontsize=7, fontweight="bold", color="black", zorder=6,
+                str(track.id),
+                (xs[-1], ys[-1]),
+                xytext=(6, 6),
+                textcoords="offset points",
+                fontsize=7,
+                fontweight="bold",
+                color="black",
+                zorder=6,
             )
 
-            legend_handles.append(
-                Line2D([0], [0], marker="o", color=color, label=f"Track {track.id} ({category})")
-            )
+            legend_handles.append(Line2D([0], [0], marker="o", color=color, label=f"Track {track.id} ({category})"))
 
         legend_handles.append(
             Line2D([0], [0], marker="o", linestyle="", color="green", markeredgecolor="black", label="Start")
@@ -363,9 +385,7 @@ class Annotator:
 
             tracking_result = self._run_tracking(img_w, img_h, animal_category_ids, detections)
 
-            counts = self._render_combined_video(
-                tracking_result.tracks, frames_dir, fps, img_w, img_h, search_key
-            )
+            counts = self._render_combined_video(tracking_result.tracks, frames_dir, fps, img_w, img_h, search_key)
             self._render_flight_path_plot(tracking_result.tracks, img_w, img_h, search_key)
 
             duration = time.time() - start
