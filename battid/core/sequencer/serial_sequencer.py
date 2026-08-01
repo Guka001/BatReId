@@ -11,7 +11,7 @@ from battid.models.report import Report
 class SerialSequencer(Sequencer):
     def __init__(self, output: Path, roi: dict[str, int] | None = None) -> None:
         super().__init__(output, roi)
-        self._logger: logging.Logger = logging.getLogger()
+        self._logger: logging.Logger = logging.getLogger(__name__)
 
     def generate_sequences(
         self, videos: list[Path], override_roi: bool = False, crop: bool = False, generate_report: bool = False

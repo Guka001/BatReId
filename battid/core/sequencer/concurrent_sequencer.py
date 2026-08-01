@@ -16,7 +16,7 @@ from battid.models.report import Report
 class ConcurrentSequencer(Sequencer):
     def __init__(self, output: Path, roi: dict[str, int] | None = None) -> None:
         super().__init__(output, roi)
-        self._logger: logging.Logger = logging.getLogger()
+        self._logger: logging.Logger = logging.getLogger(__name__)
 
     def _run_extraction_phase(self, videos: list[Path], max_workers: int) -> list[dict[str, Any]]:
         results = []

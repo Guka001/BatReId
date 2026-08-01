@@ -9,11 +9,18 @@ from PIL import Image
 from battid.core.frame_generator import FrameGenerator
 from battid.core.object_detection.mgd5 import MGD5
 from battid.core.tracking import BatTracker
-from battid.core.utils import select_roi_from_video, track_crosses_roi
+from battid.core.utils import select_roi_from_video, track_crosses_roi, pad_and_clamp_bbox
 from battid.models.detection_model_output import DCOutput
 from battid.models.report import DetectionReport, FrameGenerationReport, TrackingReport
 from battid.models.sequence_output import SequenceRecord
 from battid.models.tracking import Track, TrackingResult
+
+MIN_TRACK_LENGTH: int = 20
+LOST_TRACK_BUFFER: int = 10
+MIN_MATCHING_THRESHOLD: float = 0.25
+CROP_PADDING_RATIO: float = 0.15
+DETECTION_CONF_THRESHOLD: float = 0.3
+BORDER_TOUCH_MARGIN: int = 10
 
 
 class Sequencer(ABC):
@@ -23,13 +30,13 @@ class Sequencer(ABC):
     """
 
     def __init__(self, output: Path, roi: dict[str, int] | None = None) -> None:
-        self._logger: logging.Logger = logging.getLogger(__name__)
-        self._confidence_threshold: float = 0.3
-        self._min_track_len: int = 20
-        self._lost_track_buffer: int = 5
-        self._minimum_matching_threshold: float = 0.8
-        self._crop_padding_ratio: float = 0.15
-        self._border_touch_margin: int = 10
+        self._logger: logging.Logger = logging.getLogger(__file__)
+        self._confidence_threshold: float = DETECTION_CONF_THRESHOLD
+        self._min_track_len: int = MIN_TRACK_LENGTH
+        self._lost_track_buffer: int = LOST_TRACK_BUFFER
+        self._minimum_matching_threshold: float = MIN_MATCHING_THRESHOLD
+        self._crop_padding_ratio: float = CROP_PADDING_RATIO
+        self._border_touch_margin: int = BORDER_TOUCH_MARGIN
 
         self._output: Path = output
         self._output.mkdir(exist_ok=True)
@@ -85,7 +92,7 @@ class Sequencer(ABC):
 
         self._logger.info(f"Running detection on frames for {video}")
         detections, duration = self._detector.run_detection(frames_path)
-        detections.save(self._output.joinpath(f"{video.stem}_detections.json"))
+        detections.save(self._output.joinpath(f"{video.stem}.json"))
 
         report = DetectionReport(
             description=f"Running Megadetector detections on video: {video.name}", duration=duration
@@ -104,8 +111,7 @@ class Sequencer(ABC):
             for det in image_result.detections:
                 if det.category not in animal_category_ids:
                     continue
-                if det.conf < self._confidence_threshold:
-                    continue
+
                 x, y, w, h = det.bbox
 
                 # Denormalize the bounding box coordinates to pixel values
@@ -114,7 +120,8 @@ class Sequencer(ABC):
             per_frame_detections[frame_idx] = boxes
 
         tracker = BatTracker(
-            frame_rate=fps,
+            image_width=img_w,
+            image_height=img_h,
             track_activation_threshold=self._confidence_threshold,
             lost_track_buffer=self._lost_track_buffer,
             minimum_matching_threshold=self._minimum_matching_threshold,
@@ -193,43 +200,6 @@ class Sequencer(ABC):
             discarded_flights=discarded_flight_coordinates,
         )
 
-    def __pad_and_clamp_bbox(
-        self,
-        bbox: tuple[float, float, float, float],
-        img_w: int,
-        img_h: int,
-    ) -> tuple[int, int, int, int]:
-        """
-        Expands a bbox by `self._crop_padding_ratio` of its own width/height on
-        each side, then clamps the result to the image bounds.
-
-        Args:
-            bbox: (x1, y1, x2, y2) in pixel coordinates.
-            img_w: Width of the source frame, in pixels.
-            img_h: Height of the source frame, in pixels.
-
-        Returns:
-            (x1, y1, x2, y2) as ints, padded and clamped to [0, img_w] x [0, img_h].
-        """
-        x1, y1, x2, y2 = bbox
-        box_w = x2 - x1
-        box_h = y2 - y1
-
-        pad_x = box_w * self._crop_padding_ratio
-        pad_y = box_h * self._crop_padding_ratio
-
-        x1 -= pad_x
-        y1 -= pad_y
-        x2 += pad_x
-        y2 += pad_y
-
-        x1 = max(0, int(round(x1)))
-        y1 = max(0, int(round(y1)))
-        x2 = min(img_w, int(round(x2)))
-        y2 = min(img_h, int(round(y2)))
-
-        return x1, y1, x2, y2
-
     def __bbox_touches_border(self, x1: int, y1: int, x2: int, y2: int, img_w: int, img_h: int) -> bool:
         """
         Checks whether a (padded, clamped) bbox sits close enough to the frame
@@ -280,7 +250,7 @@ class Sequencer(ABC):
 
             cx1, cy1, cx2, cy2 = None, None, None, None
             if crop:
-                cx1, cy1, cx2, cy2 = self.__pad_and_clamp_bbox(bbox, img_w, img_h)
+                cx1, cy1, cx2, cy2 = pad_and_clamp_bbox(self._crop_padding_ratio, bbox, img_w, img_h)
 
                 if cx2 <= cx1 or cy2 <= cy1:
                     self._logger.warning(f"Degenerate crop box for track {track.id} frame {frame_idx}, skipping")

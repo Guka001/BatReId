@@ -108,3 +108,42 @@ def get_detection_workers(max_cpu_workers: int) -> int:
     if torch.cuda.is_available() or torch.backends.mps.is_available():
         return 1
     return max_cpu_workers
+
+
+def pad_and_clamp_bbox(
+    crop_padding_ratio: float,
+    bbox: tuple[float, float, float, float],
+    img_w: int,
+    img_h: int,
+) -> tuple[int, int, int, int]:
+    """
+    Expands a bbox by `self._crop_padding_ratio` of its own width/height on
+    each side, then clamps the result to the image bounds.
+
+    Args:
+        crop_padding_ratio: The crop padding ratio.
+        bbox: (x1, y1, x2, y2) in pixel coordinates.
+        img_w: Width of the source frame, in pixels.
+        img_h: Height of the source frame, in pixels.
+
+    Returns:
+        (x1, y1, x2, y2) as ints, padded and clamped to [0, img_w] x [0, img_h].
+    """
+    x1, y1, x2, y2 = bbox
+    box_w = x2 - x1
+    box_h = y2 - y1
+
+    pad_x = box_w * crop_padding_ratio
+    pad_y = box_h * crop_padding_ratio
+
+    x1 -= pad_x
+    y1 -= pad_y
+    x2 += pad_x
+    y2 += pad_y
+
+    x1 = max(0, int(round(x1)))
+    y1 = max(0, int(round(y1)))
+    x2 = min(img_w, int(round(x2)))
+    y2 = min(img_h, int(round(y2)))
+
+    return x1, y1, x2, y2

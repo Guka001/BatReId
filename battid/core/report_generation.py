@@ -144,7 +144,7 @@ class PipelineStats:
 
     def record(self, video: Path, reports: list[Report]) -> None:
         tracking_report = next((r for r in reports if isinstance(r, TrackingReport)), None)
-        if tracking_report is None:
+        if tracking_report is None or not tracking_report.overlaps:
             return
 
         self.overlaps_per_video[video.stem] = tracking_report.number_of_overlaps
