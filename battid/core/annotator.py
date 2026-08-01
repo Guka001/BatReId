@@ -355,10 +355,10 @@ class Annotator:
 
         return frames_map, videos_map
 
-    def annotate(self, videos_path: list[Path], detections_path: list[Path], frames: list[Path]) -> None:
+    def annotate(self, videos_path: list[Path], detections_paths: list[Path], frames: list[Path]) -> None:
         frames_map, videos_map = self._build_maps(frames, videos_path)
 
-        for detection_path in detections_path:
+        for detection_path in detections_paths:
             if not detection_path.is_file() or detection_path.suffix != ".json":
                 continue
 
