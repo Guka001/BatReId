@@ -26,6 +26,12 @@ class BatTracker:
       fully explained by (contained within) another track for their whole
       lifetime are dropped, since these are usually tracker artifacts
       rather than real second animals.
+    - Track stitching: after that, sequential tracks separated by a short
+      time gap are merged back together if the jump between them is
+      consistent with how fast that same animal was already observed to
+      move elsewhere in its own track, since a real animal's sudden turn
+      or dive can otherwise break frame-to-frame matching and split one
+      continuous flight into two tracks.
     """
 
     def __init__(
@@ -46,6 +52,10 @@ class BatTracker:
         enable_duplicate_suppression: bool = True,
         dedup_containment_threshold: float = 0.8,
         dedup_max_duplicate_track_length: float = math.inf,
+        enable_track_stitching: bool = True,
+        max_stitch_gap_frames: int = 10,
+        stitch_speed_multiplier: float = 2.5,
+        stitch_min_speed_floor_fraction: float = 0.05,
     ) -> None:
         """
         Args:
@@ -103,6 +113,26 @@ class BatTracker:
 
             dedup_max_duplicate_track_length: A track is only eligible to be
                 pruned as a duplicate if it has at most this many frames.
+
+            enable_track_stitching: Switch for the post-tracking cross-track
+                stitching pass. Set False to leave sequential fragments
+                (e.g. a fast direction change that breaks frame-to-frame
+                matching) as separate tracks.
+
+            max_stitch_gap_frames: Two tracks are only considered for
+                stitching if the time gap between the first one ending and
+                the second beginning is at most this many frames.
+
+            stitch_speed_multiplier: The centroid jump needed to bridge the
+                gap must be at most this multiple of the earlier track's
+                own fastest observed frame-to-frame speed, so the gate
+                scales with how fast that specific animal was already shown
+                to move rather than a fixed pixel value.
+
+            stitch_min_speed_floor_fraction: Floor for the earlier track's
+                own speed, as a fraction of the image diagonal per frame,
+                so a track that barely moved doesn't get an unreasonably
+                tight gate.
         """
         if min_low_confidence > track_activation_threshold:
             raise ValueError(
@@ -145,6 +175,14 @@ class BatTracker:
         self._enable_duplicate_suppression: bool = enable_duplicate_suppression
         self._dedup_containment_threshold: float = dedup_containment_threshold
         self._dedup_max_duplicate_track_length: float = dedup_max_duplicate_track_length
+
+        # --- cross-track stitching state (post-tracking, in finalize()) ---
+        self._enable_track_stitching: bool = enable_track_stitching
+        self._max_stitch_gap_frames: int = max_stitch_gap_frames
+        self._stitch_speed_multiplier: float = stitch_speed_multiplier
+        self._stitch_min_speed_floor_px: float = stitch_min_speed_floor_fraction * math.hypot(
+            image_width, image_height
+        )
 
     def step(self, detections: list[tuple[float, float, float, float, float]], frame_idx: int) -> None:
         """
@@ -254,6 +292,122 @@ class BatTracker:
                 pair: frames for pair, frames in self._raw_overlap_frames.items() if b_id not in pair
             }
 
+    @staticmethod
+    def _track_max_speed(track: Track) -> float:
+        """The fastest frame-to-frame centroid speed (px/frame) observed
+        anywhere in `track`'s own confirmed history, or 0.0 if it has fewer
+        than two frames."""
+        frames = sorted(track.frames)
+        max_speed = 0.0
+
+        for f_a, f_b in zip(frames, frames[1:]):
+            ca = track.history_frame_to_centroid[f_a]
+            cb = track.history_frame_to_centroid[f_b]
+            speed = math.hypot(cb[0] - ca[0], cb[1] - ca[1]) / (f_b - f_a)
+            max_speed = max(max_speed, speed)
+
+        return max_speed
+
+    def _merge_track(self, a_id: int, b_id: int) -> None:
+        """Folds track `b_id` into `a_id`: copies every frame of B onto A,
+        drops B, and re-keys any overlap-episode entries that referenced B
+        so they now reference A instead."""
+        a, b = self._tracks[a_id], self._tracks[b_id]
+
+        for frame_idx in sorted(b.frames):
+            if frame_idx in a.history_frame_to_bbox:
+                continue  # A already has this frame (e.g. a stray shared re-match); keep A's own value
+            a.add(frame_idx, b.history_frame_to_centroid[frame_idx], b.history_frame_to_bbox[frame_idx])
+
+        del self._tracks[b_id]
+
+        updated: dict[tuple[int, int], list[tuple[int, float]]] = {}
+        for (id_x, id_y), frames in self._raw_overlap_frames.items():
+            new_x = a_id if id_x == b_id else id_x
+            new_y = a_id if id_y == b_id else id_y
+            if new_x == new_y:
+                continue
+            pair = (new_x, new_y) if new_x < new_y else (new_y, new_x)
+            updated.setdefault(pair, []).extend(frames)
+        self._raw_overlap_frames = updated
+
+    def _stitch_fragmented_tracks(self) -> None:
+        """
+        Merges a track B into an earlier track A when A ends, B begins
+        within `max_stitch_gap_frames`, and the centroid jump between them
+        is consistent with a real continuation of A's own flight rather
+        than a coincidence -- judged against A's own fastest observed
+        frame-to-frame speed (floored by `stitch_min_speed_floor_fraction`)
+        scaled by `stitch_speed_multiplier`, instead of a fixed pixel or
+        IoU cutoff. This is what lets a sharp turn or dive -- which can
+        break frame-to-frame IoU matching outright -- still get bridged
+        back into one track, since the same animal's own past motion is
+        the reference, not an absolute number tuned to one clip.
+
+        Runs repeatedly until no more merges apply, so a chain of more than
+        two fragments (A, then B, then C) can be stitched back into one.
+        """
+        changed = True
+        while changed:
+            changed = False
+            track_ids = sorted(self._tracks.keys())
+
+            for a_id in track_ids:
+                if a_id not in self._tracks:
+                    continue
+                a = self._tracks[a_id]
+                allowed_speed = self._stitch_speed_multiplier * max(
+                    self._track_max_speed(a), self._stitch_min_speed_floor_px
+                )
+
+                best_b_id = None
+                best_ratio = None
+
+                for b_id in track_ids:
+                    if b_id == a_id or b_id not in self._tracks:
+                        continue
+                    b = self._tracks[b_id]
+                    b_first_frame = min(b.frames)
+
+                    # A's last frame strictly before B begins, not A's overall last
+                    # frame -- a stray late re-match (e.g. one frame where A briefly
+                    # reacquires the same box B is already using) shouldn't hide the
+                    # real gap that split the track in the first place.
+                    a_ref_frames = [f for f in a.frames if f < b_first_frame]
+                    if not a_ref_frames:
+                        continue
+                    a_last_frame = max(a_ref_frames)
+
+                    # But A must actually be *ending* around here, not merely
+                    # touching this point while genuinely continuing on its own for
+                    # a long stretch afterward (that's two real animals coexisting,
+                    # like the overlap-episode clips, not a sequential handoff).
+                    # Only a small incidental straggler right at the boundary --
+                    # within the same gap tolerance -- is allowed through.
+                    stragglers = [f for f in a.frames if f >= b_first_frame]
+                    if stragglers and max(stragglers) - b_first_frame > self._max_stitch_gap_frames:
+                        continue
+
+                    gap = b_first_frame - a_last_frame
+                    if gap <= 0 or gap > self._max_stitch_gap_frames:
+                        continue
+
+                    a_last_centroid = a.history_frame_to_centroid[a_last_frame]
+                    b_first_centroid = b.history_frame_to_centroid[b_first_frame]
+                    required_speed = math.hypot(
+                        b_first_centroid[0] - a_last_centroid[0], b_first_centroid[1] - a_last_centroid[1]
+                    ) / gap
+
+                    if required_speed <= allowed_speed:
+                        ratio = required_speed / allowed_speed
+                        if best_ratio is None or ratio < best_ratio:
+                            best_ratio, best_b_id = ratio, b_id
+
+                if best_b_id is not None:
+                    self._merge_track(a_id, best_b_id)
+                    changed = True
+                    break
+
     def _frame_already_claimed(self, frame_idx: int, exclude_track_id: int) -> bool:
         """True if some *other* track already has a detection at `frame_idx`."""
         return any(
@@ -318,6 +472,8 @@ class BatTracker:
         """
         if self._enable_duplicate_suppression:
             self._prune_duplicate_tracks()
+        if self._enable_track_stitching:
+            self._stitch_fragmented_tracks()
         return list(self._tracks.values())
 
     def number_of_ids(self) -> int:
