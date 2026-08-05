@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from battid.core.detection_steps import create_video_frames, run_detection
 from battid.core.frame_generator import FrameGenerator
 from battid.core.object_detection.mgd5 import MGD5
 from battid.core.tracking import BatTracker
@@ -76,24 +77,7 @@ class Sequencer(ABC):
              The path to the folder containing the generated frames,
              the width and height of the frames, the video fps and process report.
         """
-
-        self._logger.info(f"Generating video frames for file {video}")
-
-        destination = self._frames_output.joinpath(video.stem)
-        duration, frames = FrameGenerator.deconstruct_video_into_frames(video, destination)
-
-        report = FrameGenerationReport(
-            description=f"Generating frames for video: {video.name}",
-            duration=duration,
-            number_of_frames_generated=frames,
-        )
-
-        img_w, img_h = FrameGenerator.get_frame_size(destination)
-        fps = FrameGenerator.get_video_fps(video)
-
-        self._logger.info("Generation completed")
-
-        return destination, img_w, img_h, fps, report
+        return create_video_frames(video, self._frames_output)
 
     def _run_detection_step(self, frames_path: Path, video: Path) -> tuple[DCOutput, DetectionReport]:
         """
@@ -106,15 +90,7 @@ class Sequencer(ABC):
         Returns:
             (tuple[DCOutput, DetectionReport]). A tuple of detection results and report of the process.
         """
-
-        self._logger.info(f"Running detection on frames for {video}")
-        detections, duration = self._detector.run_detection(frames_path)
-        detections.save(self._output.joinpath(f"{video.stem}.json"))
-
-        report = DetectionReport(
-            description=f"Running Megadetector detections on video: {video.name}", duration=duration
-        )
-
+        detections, _detection_path, report = run_detection(self._detector, frames_path, video, self._output)
         return detections, report
 
     def _run_tracking_step(self, detections: DCOutput, img_w: int, img_h: int, fps: int) -> TrackingResult:

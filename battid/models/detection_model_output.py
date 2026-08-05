@@ -2,6 +2,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, field_validator
 
+from battid.models.report import Report
+
 
 class Detection(BaseModel):
     category: str
@@ -28,3 +30,14 @@ class DCOutput(BaseModel):
     def save(self, path: str | Path) -> None:
         with open(path, "w") as f:
             f.write(self.model_dump_json(indent=2))
+
+
+class DetectionGenerationRecord(BaseModel):
+    video: Path
+    frames_path: Path
+    detection_path: Path
+    detections: DCOutput
+    img_w: int
+    img_h: int
+    fps: int
+    reports: list[Report] = Field(default_factory=list)
