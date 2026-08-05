@@ -7,9 +7,9 @@ from typing import Any
 
 from tqdm import tqdm
 
+from battid.core.frame_generator import FrameGenerator
 from battid.core.report_generation import PipelineStats, write_reports
 from battid.core.sequencer.sequencer import Sequencer
-from battid.core.frame_generator import FrameGenerator
 from battid.core.utils import format_duration, get_detection_workers
 from battid.models.detection_model_output import DCOutput
 from battid.models.report import Report

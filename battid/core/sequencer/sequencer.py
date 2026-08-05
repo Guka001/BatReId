@@ -328,7 +328,7 @@ class Sequencer(ABC):
     def generate_sequences_from_detections(
         self,
         videos: list[Path],
-        detection_paths: list[DCOutput],
+        detection_paths: list[Path],
         frames_paths: list[Path],
         override_roi: bool = False,
         crop: bool = False,

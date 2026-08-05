@@ -6,7 +6,6 @@ from battid.core.object_detection.base_detection_model import BaseDetectionModel
 from battid.models.detection_model_output import DCOutput
 from battid.models.report import DetectionReport, FrameGenerationReport
 
-
 _logger: logging.Logger = logging.getLogger(__name__)
 
 
@@ -62,8 +61,6 @@ def run_detection(
     detection_path = output.joinpath(f"{video.stem}.json")
     detections.save(detection_path)
 
-    report = DetectionReport(
-        description=f"Running Megadetector detections on video: {video.name}", duration=duration
-    )
+    report = DetectionReport(description=f"Running Megadetector detections on video: {video.name}", duration=duration)
 
     return detections, detection_path, report

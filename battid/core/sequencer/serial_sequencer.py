@@ -2,9 +2,9 @@ import logging
 import time
 from pathlib import Path
 
+from battid.core.frame_generator import FrameGenerator
 from battid.core.report_generation import PipelineStats, write_reports
 from battid.core.sequencer.sequencer import Sequencer
-from battid.core.frame_generator import FrameGenerator
 from battid.core.utils import format_duration
 from battid.models.detection_model_output import DCOutput
 from battid.models.report import Report

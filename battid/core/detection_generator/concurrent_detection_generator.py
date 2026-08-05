@@ -7,11 +7,11 @@ from typing import Any
 
 from tqdm import tqdm
 
-from battid.models.detection_model_output import DetectionGenerationRecord
 from battid.core.detection_generator.detection_generator import DetectionGenerator
 from battid.core.detection_steps import create_video_frames, run_detection
 from battid.core.object_detection.base_detection_model import BaseDetectionModel
 from battid.core.utils import format_duration, get_detection_workers
+from battid.models.detection_model_output import DetectionGenerationRecord
 
 
 class ConcurrentDetectionGenerator(DetectionGenerator):
@@ -22,9 +22,7 @@ class ConcurrentDetectionGenerator(DetectionGenerator):
     def _run_extraction_phase(self, videos: list[Path], max_workers: int) -> list[dict[str, Any]]:
         results = []
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(create_video_frames, video, self._frames_output): video for video in videos
-            }
+            futures = {executor.submit(create_video_frames, video, self._frames_output): video for video in videos}
 
             with tqdm(total=len(futures), desc="Extracting frames", unit="video") as pbar:
                 for future in as_completed(futures):

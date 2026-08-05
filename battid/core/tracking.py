@@ -180,9 +180,7 @@ class BatTracker:
         self._enable_track_stitching: bool = enable_track_stitching
         self._max_stitch_gap_frames: int = max_stitch_gap_frames
         self._stitch_speed_multiplier: float = stitch_speed_multiplier
-        self._stitch_min_speed_floor_px: float = stitch_min_speed_floor_fraction * math.hypot(
-            image_width, image_height
-        )
+        self._stitch_min_speed_floor_px: float = stitch_min_speed_floor_fraction * math.hypot(image_width, image_height)
 
     def step(self, detections: list[tuple[float, float, float, float, float]], frame_idx: int) -> None:
         """
@@ -300,7 +298,7 @@ class BatTracker:
         frames = sorted(track.frames)
         max_speed = 0.0
 
-        for f_a, f_b in zip(frames, frames[1:]):
+        for f_a, f_b in zip(frames, frames[1:], strict=True):
             ca = track.history_frame_to_centroid[f_a]
             cb = track.history_frame_to_centroid[f_b]
             speed = math.hypot(cb[0] - ca[0], cb[1] - ca[1]) / (f_b - f_a)
@@ -394,9 +392,10 @@ class BatTracker:
 
                     a_last_centroid = a.history_frame_to_centroid[a_last_frame]
                     b_first_centroid = b.history_frame_to_centroid[b_first_frame]
-                    required_speed = math.hypot(
-                        b_first_centroid[0] - a_last_centroid[0], b_first_centroid[1] - a_last_centroid[1]
-                    ) / gap
+                    required_speed = (
+                        math.hypot(b_first_centroid[0] - a_last_centroid[0], b_first_centroid[1] - a_last_centroid[1])
+                        / gap
+                    )
 
                     if required_speed <= allowed_speed:
                         ratio = required_speed / allowed_speed

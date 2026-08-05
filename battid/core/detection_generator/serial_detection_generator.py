@@ -2,11 +2,11 @@ import logging
 import time
 from pathlib import Path
 
-from battid.models.detection_model_output import DetectionGenerationRecord
 from battid.core.detection_generator.detection_generator import DetectionGenerator
 from battid.core.detection_steps import create_video_frames, run_detection
 from battid.core.object_detection.base_detection_model import BaseDetectionModel
 from battid.core.utils import format_duration
+from battid.models.detection_model_output import DetectionGenerationRecord
 
 
 class SerialDetectionGenerator(DetectionGenerator):

@@ -4,11 +4,7 @@ from pathlib import Path
 
 from battid.core.object_detection.base_detection_model import BaseDetectionModel
 from battid.core.object_detection.mgd5 import MGD5
-from battid.models.detection_model_output import DCOutput
-from battid.models.report import Report
-
-
-
+from battid.models.detection_model_output import DetectionGenerationRecord
 
 
 class DetectionGenerator(ABC):
