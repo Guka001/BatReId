@@ -82,3 +82,5 @@ disallow_incomplete_defs = true   # reject partially annotated functions
 lint = {sequence = [{cmd = "ruff check battid --fix"}, {cmd = "ruff format battid"}, ]}
 typecheck = {cmd = "mypy"}
 check = ["lint", "typecheck"]
+serve = {script = "battid.app.main:run"}
+export_dataset = {script = "battid.app.export_dataset"}
