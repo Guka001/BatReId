@@ -31,6 +31,21 @@ dev = [
     "poethepoet (>=0.46.0,<0.47.0)"
 ]
 
+[[tool.poetry.source]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+priority = "explicit"
+
+[tool.poetry.dependencies]
+torch = [
+    { markers = "sys_platform == 'win32'", source = "pytorch-cu126" },
+    { markers = "sys_platform != 'win32'", source = "PyPI" },
+]
+torchvision = [
+    { markers = "sys_platform == 'win32'", source = "pytorch-cu126" },
+    { markers = "sys_platform != 'win32'", source = "PyPI" },
+]
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"
