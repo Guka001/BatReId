@@ -14,7 +14,7 @@ class DetectionGenerator(ABC):
     """
 
     def __init__(self, output: Path, detector: BaseDetectionModel | None = None) -> None:
-        self._logger: logging.Logger = logging.getLogger(__file__)
+        self._logger: logging.Logger = logging.getLogger(__name__)
         self._output: Path = output
         self._output.mkdir(exist_ok=True)
         self._frames_output: Path = self._output.joinpath("frames")

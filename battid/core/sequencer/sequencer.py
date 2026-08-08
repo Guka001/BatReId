@@ -31,7 +31,7 @@ class Sequencer(ABC):
     """
 
     def __init__(self, output: Path, roi: dict[str, int] | None = None) -> None:
-        self._logger: logging.Logger = logging.getLogger(__file__)
+        self._logger: logging.Logger = logging.getLogger(__name__)
         self._confidence_threshold: float = DETECTION_CONF_THRESHOLD
         self._min_track_len: int = MIN_TRACK_LENGTH
         self._lost_track_buffer: int = LOST_TRACK_BUFFER
