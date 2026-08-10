@@ -31,9 +31,9 @@ def build_dataset(frames_dir: Path, dataset_name: str) -> fo.Dataset:
         dataset = fo.Dataset(dataset_name, persistent=True)
         print(f"Created new persistent dataset '{dataset_name}'.")
 
-    removed = _prune_missing_samples(dataset)
-    if removed:
-        print(f"Removed {removed} samples with missing files.")
+    # removed = _prune_missing_samples(dataset)
+    # if removed:
+    #     print(f"Removed {removed} samples with missing files.")
 
     existing_paths = set(dataset.values("filepath"))
 
