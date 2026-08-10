@@ -102,7 +102,7 @@ def extract_wing_print_features(gray: np.ndarray) -> RawWingPrintFeatures | None
     patch_mask = mask_bool[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
     patch[~patch_mask] = 0
     quantized = (patch.astype(np.float32) / 256 * 32).astype(np.uint8)
-    glcm = graycomatrix(
+    glcm = graycomatrix(  # type: ignore[no-untyped-call]
         quantized,
         distances=[3],
         angles=[0, np.pi / 4, np.pi / 2, 3 * np.pi / 4],
@@ -110,10 +110,10 @@ def extract_wing_print_features(gray: np.ndarray) -> RawWingPrintFeatures | None
         symmetric=True,
         normed=True,
     )
-    homogeneity = float(graycoprops(glcm, "homogeneity").mean())
-    correlation = float(graycoprops(glcm, "correlation").mean())
-    contrast = float(graycoprops(glcm, "contrast").mean())
-    energy = float(graycoprops(glcm, "energy").mean())
+    homogeneity = float(graycoprops(glcm, "homogeneity").mean())  # type: ignore[no-untyped-call]
+    correlation = float(graycoprops(glcm, "correlation").mean())  # type: ignore[no-untyped-call]
+    contrast = float(graycoprops(glcm, "contrast").mean())  # type: ignore[no-untyped-call]
+    energy = float(graycoprops(glcm, "energy").mean())  # type: ignore[no-untyped-call]
 
     return RawWingPrintFeatures(
         mean_brightness=mean_brightness,
