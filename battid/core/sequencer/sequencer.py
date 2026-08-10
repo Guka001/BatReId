@@ -10,7 +10,7 @@ from battid.core.detection_steps import create_video_frames, run_detection
 from battid.core.frame_generator import FrameGenerator
 from battid.core.object_detection.mgd5 import MGD5
 from battid.core.tracking import BatTracker
-from battid.core.utils import pad_and_clamp_bbox, select_roi_from_video, track_crosses_roi
+from battid.core.utils import bbox_touches_border, pad_and_clamp_bbox, select_roi_from_video, track_crosses_roi
 from battid.models.detection_model_output import DCOutput
 from battid.models.report import DetectionReport, FrameGenerationReport, TrackingReport
 from battid.models.sequence_output import SequenceRecord
@@ -193,23 +193,6 @@ class Sequencer(ABC):
             discarded_flights=discarded_flight_coordinates,
         )
 
-    def __bbox_touches_border(self, x1: int, y1: int, x2: int, y2: int, img_w: int, img_h: int) -> bool:
-        """
-        Checks whether a (padded, clamped) bbox sits close enough to the frame
-        edge that the animal is likely cut off.
-
-        Args:
-            x1, y1, x2, y2: Padded and clamped bbox coordinates, in pixels.
-            img_w: Width of the source frame, in pixels.
-            img_h: Height of the source frame, in pixels.
-
-        Returns:
-            (bool): True if the bbox is within the border margin on any side.
-        """
-        margin = self._border_touch_margin
-
-        return x1 <= margin or y1 <= margin or x2 >= img_w - margin or y2 >= img_h - margin
-
     def _export_sequence(
         self, video: Path, frames_path: Path, track: Track, img_w: int, img_h: int, crop: bool
     ) -> SequenceRecord:
@@ -249,7 +232,7 @@ class Sequencer(ABC):
                     self._logger.warning(f"Degenerate crop box for track {track.id} frame {frame_idx}, skipping")
                     continue
 
-                if self.__bbox_touches_border(cx1, cy1, cx2, cy2, img_w, img_h):
+                if bbox_touches_border(self._border_touch_margin, cx1, cy1, cx2, cy2, img_w, img_h):
                     self._logger.debug(
                         f"Track {track.id} frame {frame_idx}: padded bbox touches frame border, "
                         f"likely partial animal body, skipping"
