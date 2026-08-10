@@ -10,7 +10,7 @@ from skimage.feature import graycomatrix, graycoprops
 
 from battid.core.frame_generator import FrameGenerator
 from battid.core.sequencer.sequencer import BORDER_TOUCH_MARGIN, CROP_PADDING_RATIO
-from battid.core.utils import pad_and_clamp_bbox
+from battid.core.utils import bbox_touches_border, pad_and_clamp_bbox
 from battid.models.detection_model_output import DCOutput
 from battid.models.wingprint import WingPrintMetrics
 
@@ -136,6 +136,7 @@ class WingPrint:
         self._min_detection_conf: float = 0.2
         self._clear_probability_threshold: float = 0.5
         self._crop_padding_ratio: float = CROP_PADDING_RATIO
+        self._border_touch_margin: int = BORDER_TOUCH_MARGIN
 
         self._model = joblib.load(_MODEL_PATH)
 
@@ -261,8 +262,7 @@ class WingPrint:
                     if not metrics.is_clear:
                         continue
 
-                    margin = BORDER_TOUCH_MARGIN
-                    if x1 <= margin or y1 <= margin or x2 >= img_w - margin or y2 >= img_h - margin:
+                    if not bbox_touches_border(self._border_touch_margin, x1, y1, x2, y2, img_w, img_h):
                         crop_name = f"{Path(image_result.file).stem}_det{det_idx}.jpg"
                         cv2.imwrite(str(self._output / crop_name), crop)
 

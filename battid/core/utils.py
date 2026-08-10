@@ -147,3 +147,21 @@ def pad_and_clamp_bbox(
     y2 = min(img_h, int(round(y2)))
 
     return x1, y1, x2, y2
+
+
+def bbox_touches_border(margin: int, x1: int, y1: int, x2: int, y2: int, img_w: int, img_h: int) -> bool:
+    """
+    Checks whether a (padded, clamped) bbox sits close enough to the frame
+    edge that the animal is likely cut off.
+
+    Args:
+        margin: Margin threshold
+        x1, y1, x2, y2: Padded and clamped bbox coordinates, in pixels.
+        img_w: Width of the source frame, in pixels.
+        img_h: Height of the source frame, in pixels.
+
+    Returns:
+        (bool): True if the bbox is within the border margin on any side.
+    """
+
+    return x1 <= margin or y1 <= margin or x2 >= img_w - margin or y2 >= img_h - margin
