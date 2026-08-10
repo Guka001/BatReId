@@ -1,34 +1,150 @@
-import time
 import logging
+import time
 from pathlib import Path
+from typing import NamedTuple
 
 import cv2
+import joblib
 import numpy as np
+from skimage.feature import graycomatrix, graycoprops
 
-from battid.models.wingprint import WingPrintMetrics
-from battid.models.detection_model_output import DCOutput
 from battid.core.frame_generator import FrameGenerator
 from battid.core.sequencer.sequencer import CROP_PADDING_RATIO
 from battid.core.utils import pad_and_clamp_bbox
+from battid.models.detection_model_output import DCOutput
+from battid.models.wingprint import WingPrintMetrics
+
+# Order the trained classifier expects its input vector
+FEATURE_ORDER: list[str] = [
+    "laplacian_var",
+    "edge_density",
+    "bat_area_frac",
+    "saturation_frac",
+    "mask_aspect",
+    "mean_brightness",
+    "p90_brightness",
+    "homogeneity",
+    "correlation",
+    "contrast",
+    "energy",
+]
+
+_MODEL_PATH = Path(__file__).parent / "wingprint_rf_model.joblib"
+
+# Below this many mask pixels, per-pixel statistics (especially the GLCM
+# texture features) are too noisy to be meaningful.
+# treated as "not clear"
+_MIN_MASK_PIXELS = 50
+
+
+class RawWingPrintFeatures(NamedTuple):
+    mean_brightness: float
+    p90_brightness: float
+    laplacian_var: float
+    edge_density: float
+    bat_area_frac: float
+    saturation_frac: float
+    mask_aspect: float
+    homogeneity: float
+    correlation: float
+    contrast: float
+    energy: float
+
+    def as_vector(self) -> list[float]:
+        values = self._asdict()
+        return [values[name] for name in FEATURE_ORDER]
+
+
+def extract_wing_print_features(gray: np.ndarray) -> RawWingPrintFeatures | None:
+    """
+    Computes the raw exposure/sharpness/texture feature set a padded bat crop
+    is scored on. Returns None if the crop is too small/empty to segment a
+    bat mask out of at all.
+
+    Args:
+        gray: single-channel (grayscale) padded crop.
+
+    Returns:
+        RawWingPrintFeatures, or None if no usable bat mask was found.
+    """
+    if gray.size == 0:
+        return None
+
+    # Background is near-black IR/flash footage
+    _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    mask_bool = mask > 0
+
+    if mask_bool.sum() < _MIN_MASK_PIXELS:
+        return None
+
+    bat_area_frac = float(mask_bool.sum()) / gray.size
+
+    ys, xs = np.where(mask_bool)
+    mask_w = int(xs.max() - xs.min() + 1)
+    mask_h = int(ys.max() - ys.min() + 1)
+    mask_aspect = mask_w / mask_h
+
+    bat_pixels = gray[mask_bool]
+    mean_brightness = float(bat_pixels.mean())
+    p90_brightness = float(np.percentile(bat_pixels, 90))
+    # Fraction of the bat blown out by the flash
+    saturation_frac = float((bat_pixels >= 250).sum()) / mask_bool.sum()
+
+    laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+    laplacian_var = float(laplacian[mask_bool].var())
+
+    edges = cv2.Canny(gray, 30, 90)
+    edge_density = float((edges[mask_bool] > 0).sum()) / mask_bool.sum()
+
+    # GLCM texture descriptors, computed on the bat's bounding-box patch with
+    # background pixels zeroed out. Separate membrane venation from fur/body texture
+    patch = gray[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1].copy()
+    patch_mask = mask_bool[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
+    patch[~patch_mask] = 0
+    quantized = (patch.astype(np.float32) / 256 * 32).astype(np.uint8)
+    glcm = graycomatrix(
+        quantized,
+        distances=[3],
+        angles=[0, np.pi / 4, np.pi / 2, 3 * np.pi / 4],
+        levels=32,
+        symmetric=True,
+        normed=True,
+    )
+    homogeneity = float(graycoprops(glcm, "homogeneity").mean())
+    correlation = float(graycoprops(glcm, "correlation").mean())
+    contrast = float(graycoprops(glcm, "contrast").mean())
+    energy = float(graycoprops(glcm, "energy").mean())
+
+    return RawWingPrintFeatures(
+        mean_brightness=mean_brightness,
+        p90_brightness=p90_brightness,
+        laplacian_var=laplacian_var,
+        edge_density=edge_density,
+        bat_area_frac=bat_area_frac,
+        saturation_frac=saturation_frac,
+        mask_aspect=mask_aspect,
+        homogeneity=homogeneity,
+        correlation=correlation,
+        contrast=contrast,
+        energy=energy,
+    )
 
 
 class WingPrint:
     def __init__(self, output: Path) -> None:
         self._logger: logging.Logger = logging.getLogger(__name__)
-        self._min_laplacian_var: float = 120.0
-        self._min_edge_density: float = 0.045
-        self._min_bat_pixels: int = 50
-        self._min_bat_area_frac: float = 0.03
-        self._max_saturation_frac: float = 0.15
         self._min_detection_conf: float = 0.2
+        self._clear_probability_threshold: float = 0.5
         self._crop_padding_ratio: float = CROP_PADDING_RATIO
+
+        self._model = joblib.load(_MODEL_PATH)
 
         self._output: Path = output.joinpath("wing_prints")
         self._output.mkdir(exist_ok=True, parents=True)
 
     @staticmethod
     def megadetector_bbox_to_pixels(
-            bbox_norm: list[float], img_w: int, img_h: int
+        bbox_norm: list[float], img_w: int, img_h: int
     ) -> tuple[float, float, float, float]:
         """
         Converts a MegaDetector bbox [x, y, w, h] (normalized 0-1, top-left
@@ -53,12 +169,10 @@ class WingPrint:
         Returns:
             WingPrintMetrics for the crop
         """
-        if crop.ndim == 3:
-            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = crop
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
 
-        if gray.size == 0:
+        features = extract_wing_print_features(gray)
+        if features is None:
             return WingPrintMetrics(
                 mean_brightness=0.0,
                 p90_brightness=0.0,
@@ -66,55 +180,21 @@ class WingPrint:
                 edge_density=0.0,
                 bat_area_frac=0.0,
                 saturation_frac=0.0,
+                mask_aspect=0.0,
+                homogeneity=0.0,
+                correlation=0.0,
+                contrast=0.0,
+                energy=0.0,
+                clear_probability=0.0,
                 is_clear=False,
             )
 
-        # Background is near-black IR/flash footage
-        _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        mask_bool = mask > 0
-
-        bat_area_frac = float(mask_bool.sum()) / gray.size
-
-        # Below this, the mask is a sliver of the crop (e.g. a folded/tucked
-        # bat caught mostly out of frame) rather than a body with wings
-        # spread wide enough to show venation.
-        if mask_bool.sum() < self._min_bat_pixels or bat_area_frac < self._min_bat_area_frac:
-            return WingPrintMetrics(
-                mean_brightness=0.0,
-                p90_brightness=0.0,
-                laplacian_var=0.0,
-                edge_density=0.0,
-                bat_area_frac=bat_area_frac,
-                saturation_frac=0.0,
-                is_clear=False,
-            )
-
-        bat_pixels = gray[mask_bool]
-        mean_brightness = float(bat_pixels.mean())
-        p90_brightness = float(np.percentile(bat_pixels, 90))
-        # Fraction of the bat blown out by the flash; past a point this
-        # washes out the venation instead of revealing it.
-        saturation_frac = float((bat_pixels >= 250).sum()) / mask_bool.sum()
-
-        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
-        laplacian_var = float(laplacian[mask_bool].var())
-
-        edges = cv2.Canny(gray, 30, 90)
-        edge_density = float((edges[mask_bool] > 0).sum()) / mask_bool.sum()
-
-        is_clear = (
-            laplacian_var >= self._min_laplacian_var
-            and edge_density >= self._min_edge_density
-            and saturation_frac <= self._max_saturation_frac
-        )
+        clear_probability = float(self._model.predict_proba([features.as_vector()])[0, 1])
+        is_clear = clear_probability >= self._clear_probability_threshold
 
         return WingPrintMetrics(
-            mean_brightness=mean_brightness,
-            p90_brightness=p90_brightness,
-            laplacian_var=laplacian_var,
-            edge_density=edge_density,
-            bat_area_frac=bat_area_frac,
-            saturation_frac=saturation_frac,
+            **features._asdict(),
+            clear_probability=clear_probability,
             is_clear=is_clear,
         )
 
@@ -124,10 +204,7 @@ class WingPrint:
 
         For each detections file and its corresponding frames folder, loads the
         detection outputs, crops each detected bat and scores whether the wing print
-        is clearly visible in the crop. Visibility is estimated by
-        segmenting the bat from the background and computing sharpness and
-        edge-density metrics within that region, classifying each detection as
-        a clear or not-clear.
+        is clearly visible in the crop.
 
         Args:
             detections_paths (list[Path]): List of detection outputs files.
@@ -177,9 +254,7 @@ class WingPrint:
 
                 for det_idx, det in animal_detections:
                     bbox_px = self.megadetector_bbox_to_pixels(det.bbox, img_w, img_h)
-                    x1, y1, x2, y2 = pad_and_clamp_bbox(
-                        self._crop_padding_ratio, bbox_px, img_w, img_h
-                    )
+                    x1, y1, x2, y2 = pad_and_clamp_bbox(self._crop_padding_ratio, bbox_px, img_w, img_h)
                     crop = img[y1:y2, x1:x2]
 
                     metrics = self.score_wing_print_visibility(crop)

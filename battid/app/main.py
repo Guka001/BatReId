@@ -8,7 +8,6 @@ import fiftyone as fo
 from battid.app import _DATASET_NAME
 from battid.app.builder import build_dataset
 
-
 PORT = 5151
 
 

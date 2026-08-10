@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 
@@ -13,6 +14,13 @@ def _parse_video_and_frame_id(path: Path) -> tuple[str, int | None]:
     return video_id, frame_number
 
 
+def _prune_missing_samples(dataset: fo.Dataset) -> int:
+    missing_ids = [sample.id for sample in dataset.select_fields("filepath") if not os.path.exists(sample.filepath)]
+    if missing_ids:
+        dataset.delete_samples(missing_ids)
+    return len(missing_ids)
+
+
 def build_dataset(frames_dir: Path, dataset_name: str) -> fo.Dataset:
     frames_dir = Path(frames_dir)
 
@@ -22,6 +30,10 @@ def build_dataset(frames_dir: Path, dataset_name: str) -> fo.Dataset:
     else:
         dataset = fo.Dataset(dataset_name, persistent=True)
         print(f"Created new persistent dataset '{dataset_name}'.")
+
+    removed = _prune_missing_samples(dataset)
+    if removed:
+        print(f"Removed {removed} samples with missing files.")
 
     existing_paths = set(dataset.values("filepath"))
 

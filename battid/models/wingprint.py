@@ -8,4 +8,10 @@ class WingPrintMetrics(BaseModel):
     edge_density: float
     bat_area_frac: float
     saturation_frac: float
+    mask_aspect: float
+    homogeneity: float
+    correlation: float
+    contrast: float
+    energy: float
+    clear_probability: float
     is_clear: bool
